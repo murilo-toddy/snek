@@ -5,9 +5,19 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"slices"
 	"time"
 
 	"golang.org/x/term"
+)
+
+type GameState = int
+
+const (
+	Running = iota
+	Snake1Wins
+	Snake2Wins
+	Draw
 )
 
 type Grid = [][]byte
@@ -16,18 +26,6 @@ type Cell struct {
 	row int
 	col int
 }
-
-type Snake = []Cell
-
-func head(snake Snake) Cell {
-	return snake[len(snake)-1]
-}
-
-func headless(snake Snake) Snake {
-	return snake[:len(snake)-1]
-}
-
-type Fruit = Cell
 
 type Direction = int
 
@@ -38,11 +36,75 @@ const (
 	Right
 )
 
-func assert(condition bool, msg string) {
-	if !condition {
-		panic(msg)
+type Snake = []Cell
+type Head = Cell
+
+type Player struct {
+	snake Snake
+	dir   Direction
+	score int
+}
+
+func NewPlayer(s Snake, dir Direction, score int) *Player {
+	return &Player{
+		snake: s,
+		dir:   dir,
+		score: score,
 	}
 }
+
+func (p *Player) dead(other Snake, rows, cols int) bool {
+	h := head(p.snake)
+	if h.row < 1 || h.row >= rows-1 || h.col < 1 || h.col >= cols-1 {
+		return true
+	}
+
+	if slices.Contains(headless(p.snake), h) || slices.Contains(other, h) {
+		return true
+	}
+	return false
+}
+
+func (p *Player) eaten(f Fruit) bool {
+	eaten := head(p.snake) == f
+	if eaten {
+		p.score += 1
+	}
+	return eaten
+}
+
+func (p *Player) move(eaten bool) {
+	newHead := head(p.snake)
+	switch p.dir {
+	case Up:
+		newHead.row -= 1
+	case Down:
+		newHead.row += 1
+	case Left:
+		newHead.col -= 1
+	case Right:
+		newHead.col += 1
+	}
+	if eaten {
+		p.snake = append(p.snake, newHead)
+	} else {
+		l := len(p.snake) - 1
+		for pos := range len(p.snake) - 1 {
+			(p.snake)[pos] = (p.snake)[pos+1]
+		}
+		(p.snake)[l] = newHead
+	}
+}
+
+func head(s Snake) Head {
+	return s[len(s)-1]
+}
+
+func headless(s Snake) Snake {
+	return s[:len(s)-1]
+}
+
+type Fruit = Cell
 
 func drawBorder(grid Grid, rows, cols int) {
 	grid[0][0] = '/'
@@ -68,39 +130,50 @@ func reset(grid Grid, rows, cols int) {
 	}
 }
 
-func drawFruit(grid Grid, pos Cell) {
-	grid[pos.row][pos.col] = '*'
+func drawFruit(grid Grid, f Fruit) {
+	grid[f.row][f.col] = '*'
 }
 
-func drawSnake(snake Snake, grid Grid) {
-	h := head(snake)
-	for _, cell := range snake {
-		grid[cell.row][cell.col] = '#'
+func drawSnake(grid Grid, s Snake) {
+	h := head(s)
+	for _, c := range s {
+		grid[c.row][c.col] = '#'
 	}
 	grid[h.row][h.col] = 'o'
 }
 
-func render(grid [][]byte, snake Snake, fruit Fruit, score int, lost bool) {
-	assert(len(grid) > 0, "grid should not have 0 rows")
+func render(grid [][]byte, p1, p2 *Player, fruit Fruit, state GameState) {
 	rows, cols := len(grid)-1, len(grid[0])-1
 	reset(grid, rows, cols)
 
 	drawBorder(grid, rows, cols)
 	drawFruit(grid, fruit)
-	drawSnake(snake, grid)
+	drawSnake(grid, p1.snake)
+	drawSnake(grid, p2.snake)
 
-	fmt.Printf("score: %d\r\n", score)
+	fmt.Printf("score 1: %d | score 2: %d\r\n", p1.score, p2.score)
 	for _, row := range grid {
 		for _, cell := range row {
 			fmt.Printf("%c", cell)
 		}
 		fmt.Printf("\r\n")
 	}
-	if lost {
-		fmt.Printf("\033[%dA", rows/2+3)
-		fmt.Printf("\033[%dC", cols/2-3)
-		fmt.Printf("You lost\r\n")
 
+	if state != Running {
+		switch state {
+		case Draw:
+			fmt.Printf("\033[%dA", rows/2+3)
+			fmt.Printf("\033[%dC", cols/2-1)
+			fmt.Printf("Draw\r\n")
+		case Snake1Wins:
+			fmt.Printf("\033[%dA", rows/2+3)
+			fmt.Printf("\033[%dC", cols/2-4)
+			fmt.Printf("Player 1 Wins\r\n")
+		case Snake2Wins:
+			fmt.Printf("\033[%dA", rows/2+3)
+			fmt.Printf("\033[%dC", cols/2-4)
+			fmt.Printf("Player 2 Wins\r\n")
+		}
 		fmt.Printf("\033[%dC", cols/2-7)
 		fmt.Printf("Press R to restart\r\n")
 
@@ -110,52 +183,21 @@ func render(grid [][]byte, snake Snake, fruit Fruit, score int, lost bool) {
 	fmt.Printf("\033[%dA", rows+2)
 }
 
-func move(snake *Snake, dir Direction, fruitEaten bool) {
-	newHead := head(*snake)
-	switch dir {
-	case Up:
-		newHead.row -= 1
-	case Down:
-		newHead.row += 1
-	case Left:
-		newHead.col -= 1
-	case Right:
-		newHead.col += 1
-	}
-	if fruitEaten {
-		*snake = append(*snake, newHead)
-	} else {
-		l := len(*snake) - 1
-		for pos := range len(*snake) - 1 {
-			(*snake)[pos] = (*snake)[pos+1]
-		}
-		(*snake)[l] = newHead
-	}
-}
-
-func newFruit(rows, cols int, snake Snake) Fruit {
+func newFruit(rows, cols int, snake1, snake2 Snake) Fruit {
 	row := rand.Intn(rows-2) + 1 // [1, rows-2]
 	col := rand.Intn(cols-2) + 1 // [1, cols-2]
 	// TODO: could be bad when game is close to finishing
-	for _, s := range snake {
+	for _, s := range snake1 {
 		if s.row == row && s.col == col {
-			return newFruit(rows, cols, snake)
+			return newFruit(rows, cols, snake1, snake2)
+		}
+	}
+	for _, s := range snake2 {
+		if s.row == row && s.col == col {
+			return newFruit(rows, cols, snake1, snake2)
 		}
 	}
 	return Cell{row, col}
-}
-
-func dead(snake Snake, rows, cols int) bool {
-	h := head(snake)
-	if h.row < 1 || h.row >= rows-1 || h.col < 1 || h.col >= cols-1 {
-		return true
-	}
-	for _, b := range headless(snake) {
-		if b == h {
-			return true
-		}
-	}
-	return false
 }
 
 func cleanupFunc(oldState *term.State) func() {
@@ -184,18 +226,18 @@ func main() {
 		grid[row] = make([]byte, cols)
 	}
 
-	lost := false
+	state := Running
 
-	var dir Direction
-	var snake Snake
+	var p1 *Player
+	var p2 *Player
 	var fruit Fruit
-	var score int
 
 	setup := func() {
-		dir = Left
-		snake = Snake{{10, 23}, {10, 22}, {10, 21}, {10, 20}}
-		fruit = newFruit(rows, cols, snake)
-		score = 0
+		s1 := Snake{{10, 23}, {10, 22}, {10, 21}, {10, 20}}
+		s2 := Snake{{13, 30}, {13, 29}, {10, 28}, {10, 27}}
+		p1 = NewPlayer(s1, Left, 0)
+		p2 = NewPlayer(s2, Up, 0)
+		fruit = newFruit(rows, cols, p1.snake, p2.snake)
 	}
 	setup()
 
@@ -213,26 +255,45 @@ func main() {
 					cleanup()
 					os.Exit(0)
 
+					// TODO: fix bug where the player switches directions quickly
+					// and the snake moves backwards
 				case 'a':
-					if dir != Right {
-						dir = Left
+					if p1.dir != Right {
+						p1.dir = Left
 					}
 				case 'w':
-					if dir != Down {
-						dir = Up
+					if p1.dir != Down {
+						p1.dir = Up
 					}
 				case 'd':
-					if dir != Left {
-						dir = Right
+					if p1.dir != Left {
+						p1.dir = Right
 					}
 				case 's':
-					if dir != Up {
-						dir = Down
+					if p1.dir != Up {
+						p1.dir = Down
+					}
+
+				case 'j':
+					if p2.dir != Right {
+						p2.dir = Left
+					}
+				case 'i':
+					if p2.dir != Down {
+						p2.dir = Up
+					}
+				case 'l':
+					if p2.dir != Left {
+						p2.dir = Right
+					}
+				case 'k':
+					if p2.dir != Up {
+						p2.dir = Down
 					}
 				case 'r':
-					if lost {
+					if state != Running {
 						setup()
-						lost = false
+						state = Running
 					}
 				}
 			}
@@ -240,18 +301,34 @@ func main() {
 	}()
 
 	for {
-		lost = dead(snake, rows, cols)
+		snake1Dead := p1.dead(p2.snake, rows, cols)
+		snake2Dead := p2.dead(p1.snake, rows, cols)
 
-		if !lost {
-			fruitEaten := head(snake) == fruit
-			move(&snake, dir, fruitEaten)
-			if fruitEaten {
-				fruit = newFruit(rows, cols, snake)
-				score += 1
+		if snake1Dead && snake2Dead {
+			if p1.score == p2.score {
+				state = Draw
+			} else if p1.score > p2.score {
+				state = Snake1Wins
+			} else {
+				state = Snake2Wins
 			}
 		}
 
-		render(grid, snake, fruit, score, lost)
+		if state == Running {
+			eaten1 := p1.eaten(fruit)
+			eaten2 := p2.eaten(fruit)
+			if !snake1Dead {
+				p1.move(eaten1)
+			}
+			if !snake2Dead {
+				p2.move(eaten2)
+			}
+			if eaten1 || eaten2 {
+				fruit = newFruit(rows, cols, p1.snake, p2.snake)
+			}
+		}
+
+		render(grid, p1, p2, fruit, state)
 		time.Sleep(100 * time.Millisecond)
 	}
 }
